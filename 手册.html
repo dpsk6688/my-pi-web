@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-pi-web v1.0 操作手册 - 本地离线版 pi</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0a;color:#fff;line-height:1.6}
+.hero{height:40vh;min-height:320px;background:linear-gradient(135deg,#7c3aed,#3b82f6,#06b6d4);display:flex;align-items:end;padding:40px;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 30% 20%,rgba(255,255,255,0.3),transparent 50%)}
+.hero h1{font-size:3rem;font-weight:900;position:relative}
+.hero p{opacity:0.8;margin-top:8px;position:relative}
+.nav{position:sticky;top:0;background:rgba(10,10,10,0.9);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,0.1);padding:12px 24px;display:flex;gap:12px;overflow:auto;z-index:10}
+.nav a{padding:8px 16px;border-radius:999px;background:rgba(255,255,255,0.08);color:#fff;text-decoration:none;font-size:13px;white-space:nowrap}
+.nav a:hover{background:#fff;color:#000}
+.container{max-width:800px;margin:0 auto;padding:32px 20px}
+.card{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:24px;margin:24px 0;backdrop-filter:blur(20px)}
+.card h2{font-size:1.5rem;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.gradient{height:6px;border-radius:999px;margin-bottom:16px}
+.violet{background:linear-gradient(90deg,#8b5cf6,#ec4899)}
+.blue{background:linear-gradient(90deg,#3b82f6,#06b6d4)}
+.green{background:linear-gradient(90deg,#10b981,#06b6d4)}
+.fuchsia{background:linear-gradient(90deg,#e879f9,#ec4899)}
+.orange{background:linear-gradient(90deg,#f97316,#ef4444)}
+pre{background:#00000080;padding:16px;border-radius:12px;overflow:auto;font-size:12px;margin:12px 0;border:1px solid rgba(255,255,255,0.1)}
+code{font-family:Menlo,monospace}
+.badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700}
+.badge-green{background:#10b98120;color:#10b981;border:1px solid #10b98130}
+.badge-yellow{background:#f59e0b20;color:#f59e0b;border:1px solid #f59e0b30}
+.kbd{background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:4px;font-size:11px;border-bottom:2px solid rgba(255,255,255,0.2)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:10px;border-bottom:1px solid rgba(255,255,255,0.08)}
+th{opacity:0.5;font-size:11px;text-transform:uppercase;letter-spacing:0.05em}
+</style>
+</head>
+<body>
+<div class="hero">
+  <div>
+    <h1>my-pi-web v1.0</h1>
+    <p>本地离线版 pi / Claude Code 复刻 · Ollama 7b · 完全离线 · 不花钱</p>
+    <p style="margin-top:16px"><span class="badge badge-green">● 运行正常</span> <span class="badge badge-yellow">7b 稳定版</span></p>
+  </div>
+</div>
+<div class="nav">
+  <a href="#start">🚀 快速开始</a>
+  <a href="#ui">🖥️ 界面</a>
+  <a href="#magic">✨ 咒语</a>
+  <a href="#tools">🔧 工具</a>
+  <a href="#pages">📦 示例</a>
+  <a href="#commands">💬 指令</a>
+  <a href="#faq">❓ FAQ</a>
+  <a href="#arch">🏗️ 架构</a>
+</div>
+<div class="container">
+
+<div class="card" id="start">
+  <div class="gradient violet"></div>
+  <h2>🚀 快速开始</h2>
+  <p><b>一键启动（推荐）：</b></p>
+  <pre><code>Windows: 双击 start.bat
+Mac/Linux: chmod +x start.sh && ./start.sh
+→ 自动拉模型、写 .env.local、启动 dev
+→ 打开 http://localhost:30141</code></pre>
+  <p><b>手动启动：</b></p>
+  <pre><code>ollama serve
+ollama pull qwen2.5-coder:7b
+cd my-pi-web-mvp
+npm install --registry=https://registry.npmmirror.com
+echo "OLLAMA_MODEL=qwen2.5-coder:7b" > .env.local
+echo "OLLAMA_HOST=http://127.0.0.1:11434" >> .env.local
+npm run dev</code></pre>
+</div>
+
+<div class="card" id="ui">
+  <div class="gradient blue"></div>
+  <h2>🖥️ 界面说明</h2>
+  <table>
+    <tr><th>区域</th><th>功能</th></tr>
+    <tr><td>左侧边栏</td><td>会话列表、新会话、Fork 复制</td></tr>
+    <tr><td>中部对话</td><td>流式打字机、tool_call 可视化、成本统计</td></tr>
+    <tr><td>右侧文件</td><td>实时文件树、刷新、预览</td></tr>
+  </table>
+  <p style="margin-top:12px;font-size:12px;opacity:0.6">顶部显示 Session ID | 完整本地版 | Fork | 文件 | 工具</p>
+</div>
+
+<div class="card" id="magic">
+  <div class="gradient fuchsia"></div>
+  <h2>✨ 核心咒语（必读）</h2>
+  <p>qwen2.5-coder:7b 是小模型，不加咒语会只展示代码不写文件。</p>
+  <pre><code>必须调用 write_file 工具</code></pre>
+  <p>完整示例：</p>
+  <pre><code>创建一个炫酷的登录页面到 app/login/page.tsx，要有渐变背景和动画，必须调用 write_file 工具</code></pre>
+  <p>成功标志：对话出现 <code>{"name":"write_file"}</code> + <code>🔧 write_file</code></p>
+</div>
+
+<div class="card" id="tools">
+  <div class="gradient green"></div>
+  <h2>🔧 内置工具</h2>
+  <table>
+    <tr><th>工具</th><th>说明</th><th>示例</th></tr>
+    <tr><td><code>list_files</code></td><td>列目录</td><td>{"path":"app"}</td></tr>
+    <tr><td><code>read_file</code></td><td>读文件</td><td>{"path":"app/page.tsx"}</td></tr>
+    <tr><td><code>write_file</code></td><td>写文件，自动建目录</td><td>{"path":"app/x/page.tsx","content":"..."}</td></tr>
+  </table>
+  <p style="margin-top:8px;font-size:12px;opacity:0.6">所有操作本地执行，无上传。</p>
+</div>
+
+<div class="card" id="pages">
+  <div class="gradient orange"></div>
+  <h2>📦 内置炫酷页面</h2>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+    <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:16px;text-align:center"><div style="font-size:24px">🧮</div><div style="font-size:12px;margin-top:4px">/calc<br/>紫青渐变+玻璃</div></div>
+    <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:16px;text-align:center"><div style="font-size:24px">✅</div><div style="font-size:12px;margin-top:4px">/todo<br/>本地存储+动画</div></div>
+    <div style="background:rgba(255,255,255,0.06);padding:16px;border-radius:16px;text-align:center"><div style="font-size:24px">⛅</div><div style="font-size:12px;margin-top:4px">/weather<br/>5天预报+玻璃</div></div>
+  </div>
+  <div style="margin-top:12px;background:rgba(255,255,255,0.06);padding:16px;border-radius:16px;text-align:center"><div style="font-size:24px">📖</div><div style="font-size:12px;margin-top:4px">/manual<br/>本手册炫酷版</div></div>
+</div>
+
+<div class="card" id="commands">
+  <div class="gradient violet"></div>
+  <h2>💬 常用指令集（复制即用）</h2>
+  <pre><code>列出 app 目录的文件
+读取 app/page.tsx
+
+创建一个炫酷的登录页面到 app/login/page.tsx，居中卡片，渐变背景，必须调用 write_file 工具
+创建一个 Dashboard 到 app/dashboard/page.tsx，左侧边栏，右侧统计卡片，必须调用 write_file 工具
+创建一个音乐播放器页面到 app/music/page.tsx，玻璃拟态，必须调用 write_file 工具
+
+把 app/calc/page.tsx 背景改成橙色渐变，必须调用 write_file 工具
+给 app/todo/page.tsx 加搜索功能，必须调用 write_file 工具</code></pre>
+</div>
+
+<div class="card" id="faq">
+  <div class="gradient blue"></div>
+  <h2>❓ 常见问题</h2>
+  <p><b>params should be awaited</b><br/><span style="opacity:0.6;font-size:12px">Next.js 15 新特性，v1.0 已修复 route.ts</span></p>
+  <p style="margin-top:12px"><b>一直 mock 响应</b><br/><span style="opacity:0.6;font-size:12px">浏览器缓存，Ctrl+Shift+R 强制刷新</span></p>
+  <p style="margin-top:12px"><b>Ollama 连接失败</b><br/><span style="opacity:0.6;font-size:12px">检查 ollama serve 是否运行，http://127.0.0.1:11434</span></p>
+  <p style="margin-top:12px"><b>next 不是内部命令</b><br/><span style="opacity:0.6;font-size:12px">npm install 没执行，node_modules 缺失</span></p>
+  <p style="margin-top:12px"><b>页面白屏</b><br/><span style="opacity:0.6;font-size:12px">小模型生成代码有语法错误，看终端报错，用成品覆盖</span></p>
+</div>
+
+<div class="card" id="arch">
+  <div class="gradient green"></div>
+  <h2>🏗️ 架构</h2>
+  <pre><code>浏览器 ChatWindow
+  └─ useAgentSession hook (SSE)
+      └─ GET /api/agent/[id]/events?message=
+          └─ lib/local-agent.ts
+              ├─ Ollama /api/chat 流式
+              ├─ 解析 tool_calls
+              ├─ callTool → fs.writeFile 真实写盘
+              └─ 递归让模型总结
+          └─ SSE → 前端打字机 + 🔧 可视化</code></pre>
+  <p style="margin-top:12px;font-size:12px;opacity:0.6">关键文件：app/api/agent/[id]/events/route.ts / lib/local-agent.ts / hooks/useAgentSession.ts</p>
+</div>
+
+<div style="text-align:center;padding:40px 0;opacity:0.4;font-size:12px">
+  my-pi-web v1.0 • 本地 AI • 完全离线 • MIT License<br/>
+  Made with ❤️ • 自由编程 • 不花钱不上传
+</div>
+
+</div>
+</body>
+</html>
