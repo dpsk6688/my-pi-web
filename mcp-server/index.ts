@@ -23,6 +23,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import crypto from "crypto";
+import { TaskManager } from "./task-core.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -240,7 +241,7 @@ function auditLog(entry: any) {
 app.get("/", (req, res) => {
   res.json({ 
     name: "MY-PI-WEB WEB MCP 2.0 HARDENED", 
-    version: "2.1.0-hardening.1", 
+    version: "2.1.0-task-core.1", 
     sse: "/sse", 
     bind: `${BIND_HOST}:${MCP_PORT}`,
     auth: AUTH_TOKEN ? "ENABLED" : "DISABLED-DEV-ONLY",
@@ -268,6 +269,32 @@ const TOOL_REGISTRY = {
     description: "Write file inside APP_ROOT (audited, snapshot before write in P2)",
     inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }
   },
+  // PR-2.1 Task Core Tools
+  create_task: {
+    name: "create_task",
+    description: "PR-2.1: Create SARA task (pending->running->completed, session isolated)",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, type: { type: "string", enum: ["file","command","general","approval"], default: "general" }, description: { type: "string" } }, required: ["title"] }
+  },
+  list_tasks: {
+    name: "list_tasks",
+    description: "PR-2.1: List tasks for current session",
+    inputSchema: { type: "object", properties: {} }
+  },
+  get_task: {
+    name: "get_task",
+    description: "PR-2.1: Get task by id (session isolated)",
+    inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] }
+  },
+  approve_task: {
+    name: "approve_task",
+    description: "PR-2.1: Approve/Deny task in needs_approval (high risk commands still DENY via P0 guard)",
+    inputSchema: { type: "object", properties: { taskId: { type: "string" }, approved: { type: "boolean" } }, required: ["taskId","approved"] }
+  },
+  cancel_task: {
+    name: "cancel_task",
+    description: "PR-2.1: Cancel task (pending/running/needs_approval -> cancelled)",
+    inputSchema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] }
+  },
   run_command: {
     name: "run_command",
     description: "Run whitelisted command only (disabled by default, no shell, needs approval for high-risk)",
@@ -281,7 +308,7 @@ app.get("/sse", authMiddleware, async (req, res) => {
   
   console.log(`[MCP] New SSE connection, hint=${sessionIdHint}, ip=${req.ip}`);
   
-  const server = new McpServer({ name: "my-pi-web-hardened", version: "2.1.0-hardening.1" }, { capabilities: { tools: {} } } as any);
+  const server = new McpServer({ name: "my-pi-web-hardened", version: "2.1.0-task-core.1" }, { capabilities: { tools: {} } } as any);
   
   // List tools
   (server as any).setRequestHandler = (server as any).setRequestHandler || (() => {});
@@ -328,6 +355,46 @@ app.get("/sse", authMiddleware, async (req, res) => {
     console.error("[MCP] Tool registration error", e);
   }
   
+
+      
+      // PR-2.1 Task Core Tools Registration
+      if ((server as any).tool) {
+        const taskManager = new TaskManager();
+        
+        (server as any).tool("create_task", "Create SARA task", { title: { type: "string" }, type: { type: "string" }, description: { type: "string" } } as any, async ({ title, type, description }: any, extra: any) => {
+          const sessId = (extra as any)?.sessionId || (req as any).query?.sessionId || "default";
+          const task = await taskManager.createTask({ sessionId: sessId, title, type: type || "general", description });
+          auditLog({ action: "create_task", resource: task.id, actor: (req as any).auth?.userId || req.ip, result: "ALLOW" });
+          return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }] };
+        });
+        
+        (server as any).tool("list_tasks", "List tasks", {} as any, async (_: any, extra: any) => {
+          const sessId = (extra as any)?.sessionId || (req as any).query?.sessionId || "default";
+          const tasks = await taskManager.listBySession(sessId);
+          return { content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }] };
+        });
+        
+        (server as any).tool("get_task", "Get task", { taskId: { type: "string" } } as any, async ({ taskId }: any, extra: any) => {
+          const sessId = (extra as any)?.sessionId || (req as any).query?.sessionId || "default";
+          const task = await taskManager.getTask(taskId, sessId);
+          return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }] };
+        });
+        
+        (server as any).tool("approve_task", "Approve task", { taskId: { type: "string" }, approved: { type: "boolean" } } as any, async ({ taskId, approved }: any, extra: any) => {
+          const sessId = (extra as any)?.sessionId || (req as any).query?.sessionId || "default";
+          const task = await taskManager.approve(taskId, sessId, approved);
+          auditLog({ action: "approve_task", resource: taskId, actor: (req as any).auth?.userId || req.ip, result: approved ? "APPROVED" : "DENIED" });
+          return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }] };
+        });
+        
+        (server as any).tool("cancel_task", "Cancel task", { taskId: { type: "string" } } as any, async ({ taskId }: any, extra: any) => {
+          const sessId = (extra as any)?.sessionId || (req as any).query?.sessionId || "default";
+          const task = await taskManager.cancel(taskId, sessId);
+          auditLog({ action: "cancel_task", resource: taskId, actor: (req as any).auth?.userId || req.ip, result: "ALLOW" });
+          return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }] };
+        });
+      }
+
   const transport = new SSEServerTransport("/messages", res as any);
   const realSessionId = (transport as any).sessionId || sessionIdHint;
   
