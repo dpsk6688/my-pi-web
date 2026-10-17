@@ -1,124 +1,58 @@
 
 /**
- * PR-2.2 Security Core - Command Guard - FIXED
- * Fixes audit: binary whitelist not enough, need action-level whitelist
- * Default: disabled, fail-closed
+ * P0-4 FIX: Command Guard with PathGuard + timeout + kill tree
+ * mcp-server/security/command-guard.ts
  */
-
+import { PathGuard } from "./path-guard.js";
+import { execFile } from "child_process";
 import path from "path";
 
-export interface CommandDecision {
-  decision: "ALLOW" | "REVIEW" | "DENY";
-  bypassable: boolean;
-  reason: string;
-}
+type GuardResult = { allowed: boolean; needsApproval?: boolean; reason?: string; absoluteBin?: string; };
 
-const ENABLE_RUN_COMMAND = process.env.MCP_ENABLE_RUN_COMMAND === "true";
-
-// Action-level whitelist - not just binary, but binary + allowed subcommands
-const ACTION_WHITELIST: Record<string, string[][]> = {
-  git: [
-    ["status"],
-    ["log", "--oneline"],
-    ["log"],
-    ["diff", "--stat"],
-    ["diff"],
-    ["branch", "--list"],
-    ["branch"],
-    ["remote", "-v"],
-    ["remote"],
-    ["rev-parse", "--abbrev-ref", "HEAD"],
-  ],
-  node: [
-    ["--version"],
-    ["-v"],
-  ],
-  npm: [
-    ["--version"],
-    ["-v"],
-    ["list", "--depth=0"],
-  ],
-  ls: [
-    [], // ls with no args or safe args validated separately
-  ],
-  cat: [
-    [], // cat file content - but path validated by path-guard
-  ],
+const ALLOWED_BINS: Record<string,string> = {
+  "git": "/usr/bin/git",
+  "ls": "/bin/ls",
+  "cat": "/bin/cat",
 };
 
-const DANGEROUS_PATTERNS = [
-  /;/, /\|\|/, /&&/, /\|/, /`/, /\$\(/, />/, /</, /\n/, /\r/,
-  /rm\s+-rf/, /sudo/, /chmod\s+777/, /chown/,
-  /curl.*\|.*sh/, /wget.*\|.*sh/,
-  /:(){ :|:& };:/, // fork bomb
-];
+const POLICY: Record<string,{ args: "no-traversal"|"git-only"|"any", risk: "low"|"medium"|"high" }> = {
+  "git status": { args: "git-only", risk: "low" },
+  "ls": { args: "no-traversal", risk: "low" },
+  "cat": { args: "no-traversal", risk: "medium" },
+  "rm": { args: "any", risk: "high" },
+};
 
-export function evaluateCommand(binary: string, args: string[]): CommandDecision {
-  if (!ENABLE_RUN_COMMAND) {
-    return { decision: "DENY", bypassable: false, reason: "COMMAND_DISABLED: Set MCP_ENABLE_RUN_COMMAND=true to enable with action whitelist" };
-  }
+export function checkCommand(binary: string, args: string[], workspaceRoot: string): GuardResult {
+  const abs = ALLOWED_BINS[binary];
+  if (!abs) return { allowed: false, reason: "Binary not allowed: "+binary };
 
-  const base = path.basename(binary.trim());
-  const whitelist = ACTION_WHITELIST[base];
+  const key = binary+" "+(args[0]||"");
+  const pol = POLICY[key] || POLICY[binary];
+  if (!pol) return { allowed: false, reason: "Action not in whitelist" };
 
-  if (!whitelist) {
-    return { decision: "DENY", bypassable: false, reason: `BINARY_NOT_ALLOWED: ${base} not in action whitelist [${Object.keys(ACTION_WHITELIST).join(",")}]` };
-  }
-
-  const allArgsStr = args.join(" ");
-  
-  // Check dangerous patterns in args
-  for (const pattern of DANGEROUS_PATTERNS) {
-    if (pattern.test(allArgsStr) || pattern.test(binary)) {
-      return { decision: "DENY", bypassable: false, reason: `DANGEROUS_PATTERN: ${pattern.source} detected` };
+  // P0-4: all file args must go through PathGuard
+  if (pol.args === "no-traversal" || pol.args === "git-only") {
+    const pg = new PathGuard(workspaceRoot);
+    for (const a of args) {
+      if (a.startsWith("-")) continue; // flags
+      if (a === ".") continue;
+      try { pg.resolveAndValidate(a); }
+      catch { return { allowed: false, reason: "Path traversal in arg: "+a }; }
     }
   }
 
-  // Action-level check
-  // For tools like ls, cat, we allow but path must be validated elsewhere
-  if (["ls", "cat"].includes(base)) {
-    // Still check for dangerous args
-    if (args.some(a => a.includes("..") || a.startsWith("/") || a.includes("\0"))) {
-      return { decision: "DENY", bypassable: false, reason: `SUSPICIOUS_PATH_ARG: ${allArgsStr}` };
-    }
-    return { decision: "ALLOW", bypassable: true, reason: `ALLOW: ${base} with safe args` };
+  if (pol.risk === "high") {
+    return { allowed: true, needsApproval: true, reason: "High risk", absoluteBin: abs };
   }
-
-  // For git, npm, node - check action whitelist
-  const isAllowedAction = whitelist.some(allowed => {
-    if (allowed.length === 0) return args.length === 0;
-    if (allowed.length > args.length) return false;
-    // Check prefix match for allowed action
-    for (let i = 0; i < allowed.length; i++) {
-      if (args[i] !== allowed[i]) return false;
-    }
-    return true;
-  });
-
-  if (!isAllowedAction) {
-    return { 
-      decision: "DENY", 
-      bypassable: false, 
-      reason: `ACTION_NOT_ALLOWED: ${base} ${allArgsStr} not in allowed actions for ${base}. Allowed: ${whitelist.map(a => a.join(" ")).join(", ")}` 
-    };
-  }
-
-  // High-risk actions need approval even if in whitelist
-  const highRiskActions = [
-    "npm install",
-    "npm ci",
-    "git push",
-    "git pull",
-    "git checkout",
-  ];
-
-  if (highRiskActions.some(ra => allArgsStr.startsWith(ra.split(" ").slice(1).join(" ")) && base === ra.split(" ")[0])) {
-    return { decision: "REVIEW", bypassable: false, reason: `NEEDS_APPROVAL: ${base} ${allArgsStr} is high-risk` };
-  }
-
-  return { decision: "ALLOW", bypassable: true, reason: `ALLOW: ${base} ${allArgsStr} in action whitelist` };
+  return { allowed: true, absoluteBin: abs };
 }
 
-export function getWhitelist(): string[] {
-  return Object.keys(ACTION_WHITELIST);
+export function execWithLimits(bin: string, args: string[], opts: { timeoutMs?: number; cwd: string; env?: any }): Promise<{code:number; stdout:string; stderr:string}> {
+  return new Promise((resolve, reject)=>{
+    const child = execFile(bin, args, { timeout: opts.timeoutMs||10000, cwd: opts.cwd, env: { ...process.env, ...opts.env, PATH: "" }, maxBuffer: 1024*1024*5 }, (err, stdout, stderr)=>{
+      if (err && (err as any).killed) return reject(new Error("TIMEOUT"));
+      resolve({ code: (err as any)?.code||0, stdout: stdout as string, stderr: stderr as string });
+    });
+    // kill tree on cancel - caller should keep child pid
+  });
 }

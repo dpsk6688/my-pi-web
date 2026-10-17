@@ -1,109 +1,38 @@
 
 /**
- * PR-2.2 Security Core - Path Guard - FIXED
- * Fixes audit issue: realpath check using startsWith is vulnerable to /srv/app vs /srv/application-secret
- * Must use path.relative for realpath validation
+ * P0-1 FIX: Unified Path Guard - mcp-server/security/path-guard.ts
+ * Replace startsWith with path.relative
+ * task-core.ts must DELETE its own resolveAndValidatePath and import this
  */
-
-import fs from "fs";
 import path from "path";
-
-export function getAppRoot(override?: string): string {
-  return path.resolve(override || process.env.APP_ROOT || process.cwd());
-}
-
-export function isSubPath(parent: string, child: string): boolean {
-  // Secure check: child must be inside parent, not just string prefix
-  const rel = path.relative(parent, child);
-  return !!rel && !rel.startsWith("..") && !path.isAbsolute(rel);
-}
-
-export function isSameOrSubPath(parent: string, child: string): boolean {
-  const rel = path.relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-export function resolveAndValidatePath(userPath: string, appRootOverride?: string): string {
-  const APP_ROOT = getAppRoot(appRootOverride);
-  
-  if (!userPath || typeof userPath !== "string") {
-    throw Object.assign(new Error("INVALID_PATH: empty"), { code: "INVALID_PATH" });
+import { realpathSync } from "fs";
+export class PathGuardError extends Error { constructor(m){super(m); this.name="PATH_TRAVERSAL";} }
+export class PathGuard {
+  realRoot: string;
+  constructor(rootDir: string) {
+    const root = path.resolve(rootDir);
+    try { this.realRoot = realpathSync(root); } catch { this.realRoot = root; }
   }
-  if (userPath.includes("\0")) {
-    throw Object.assign(new Error("NULL_BYTE"), { code: "NULL_BYTE" });
-  }
-
-  const normalized = path.normalize(userPath);
-  const resolved = path.resolve(APP_ROOT, normalized);
-  const rel = path.relative(APP_ROOT, resolved);
-  
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw Object.assign(new Error(`PATH_TRAVERSAL: ${userPath}`), { code: "PATH_TRAVERSAL" });
-  }
-
-  // Realpath checks - FIXED: use relative, not startsWith
-  try {
-    const realRoot = fs.realpathSync(APP_ROOT);
-    let realCheck: string;
-
-    if (fs.existsSync(resolved)) {
-      realCheck = fs.realpathSync(resolved);
-      // FIX: Use isSameOrSubPath, not startsWith
-      if (!isSameOrSubPath(realRoot, realCheck)) {
-        throw Object.assign(new Error(`SYMLINK_ESCAPE: ${userPath} -> ${realCheck} not in ${realRoot}`), { code: "SYMLINK_ESCAPE" });
-      }
-    } else {
-      // Find nearest existing parent
-      let parent = path.dirname(resolved);
-      let depth = 0;
-      while (!fs.existsSync(parent) && parent !== APP_ROOT && depth < 20) {
-        const next = path.dirname(parent);
-        if (next === parent) break;
-        parent = next;
-        depth++;
-      }
-      if (!fs.existsSync(parent)) {
-        throw Object.assign(new Error(`PARENT_NOT_FOUND: ${userPath}`), { code: "PARENT_NOT_FOUND" });
-      }
-      const realParent = fs.realpathSync(parent);
-      if (!isSameOrSubPath(realRoot, realParent)) {
-        throw Object.assign(new Error(`PARENT_ESCAPE: ${userPath}`), { code: "PARENT_ESCAPE" });
-      }
-      const relativePart = path.relative(parent, resolved);
-      realCheck = path.join(realParent, relativePart);
-      if (!isSameOrSubPath(realRoot, realCheck)) {
-        throw Object.assign(new Error(`PATH_TRAVERSAL_AFTER_REALPATH: ${userPath}`), { code: "PATH_TRAVERSAL" });
-      }
-      return resolved;
+  isSameOrSubPath(target: string): boolean {
+    const resolved = path.resolve(this.realRoot, target);
+    let realTarget: string;
+    try { realTarget = realpathSync(resolved); }
+    catch {
+      try {
+        const rp = realpathSync(path.dirname(resolved));
+        const rel = path.relative(this.realRoot, rp);
+        if (rel.startsWith("..") || path.isAbsolute(rel)) { if (rp !== this.realRoot) return false; }
+        return true;
+      } catch { return false; }
     }
-  } catch (e: any) {
-    // FIX: Do NOT swallow errors - fail-closed
-    if (e.code && ["PATH_TRAVERSAL", "SYMLINK_ESCAPE", "PARENT_ESCAPE", "NULL_BYTE", "INVALID_PATH", "PARENT_NOT_FOUND", "PATH_TRAVERSAL_AFTER_REALPATH"].includes(e.code)) {
-      throw e;
-    }
-    // For realpath errors on non-existing paths, we already validated parent
-    // But if realRoot check fails, we must fail-closed
-    if (e.code === "ENOENT") {
-      // Parent not found already handled
-    } else {
-      // Any other FS error during security check -> fail closed
-      throw Object.assign(new Error(`PATH_GUARD_FS_ERROR: ${e.message}`), { code: "PATH_GUARD_FS_ERROR" });
-    }
+    const rel = path.relative(this.realRoot, realTarget);
+    if (rel === "") return true;
+    return !(rel.startsWith("..") || path.isAbsolute(rel));
   }
-
-  return resolved;
-}
-
-// Atomic write helper - fixes audit issue: check-then-write race
-export async function atomicWriteFile(filePath: string, content: string, appRootOverride?: string): Promise<void> {
-  const { default: fsp } = await import("fs/promises");
-  const safePath = resolveAndValidatePath(filePath, appRootOverride);
-  const dir = path.dirname(safePath);
-  await fsp.mkdir(dir, { recursive: true });
-  // Re-validate after mkdir (TOCTOU mitigation)
-  resolveAndValidatePath(filePath, appRootOverride);
-  
-  const tmpPath = `${safePath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-  await fsp.writeFile(tmpPath, content, "utf-8");
-  await fsp.rename(tmpPath, safePath);
+  resolveAndValidate(unsafe: string): string {
+    if (unsafe.includes("\0")) throw new PathGuardError("Null byte");
+    const resolved = path.resolve(this.realRoot, unsafe);
+    if (!this.isSameOrSubPath(resolved)) throw new PathGuardError("Traversal "+unsafe);
+    return resolved;
+  }
 }
