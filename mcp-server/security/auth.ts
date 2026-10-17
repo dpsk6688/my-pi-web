@@ -1,9 +1,10 @@
+import { createHash, timingSafeEqual } from "crypto";
 
 /**
  * P0-2 + P0-3 FIX: Auth + Principal + Session Binding
  * mcp-server/security/auth.ts
  */
-export type Principal = { id: string; role: "user"|"approver"|"admin"; tokenHash: string; };
+export type Principal = { id: string; principalId: string; role: "user"|"approver"|"admin"; tokenHash: string; };
 
 export function assertAuthConfig() {
   // FIX: Check BOTH NODE_ENV and APP_ENV, and fail closed
@@ -18,18 +19,37 @@ export function assertAuthConfig() {
 }
 
 export function getPrincipalFromRequest(req: { headers: Record<string,string> }): Principal | null {
-  const auth = req.headers["authorization"] || req.headers["Authorization"];
-  if (!auth?.startsWith("Bearer ")) return null;
-  const token = auth.slice(7);
-  // hash and lookup principal - production should use secure compare
-  // For now, principal id = token hash prefix
+  const token = extractToken(req);
+  const expected = process.env.MCP_AUTH_TOKEN;
+  if (!token || !expected) return null;
+
+  const supplied = Buffer.from(token);
+  const configured = Buffer.from(expected);
+  if (supplied.length !== configured.length || !timingSafeEqual(supplied, configured)) return null;
+
   const tokenHash = hashToken(token);
-  return { id: "principal_"+tokenHash.slice(0,8), role: "user", tokenHash };
+  const id = "principal_" + tokenHash.slice(0, 16);
+  return { id, principalId: id, role: "user", tokenHash };
 }
 
-function hashToken(t: string): string { 
-  // placeholder - use crypto.createHash in real code
-  let h=0; for(let i=0;i<t.length;i++) h=(h*31+t.charCodeAt(i))>>>0; return h.toString(16); 
+export function extractToken(req: { headers: Record<string, string | undefined> }): string | null {
+  const header = req.headers.authorization || req.headers.Authorization;
+  const match = header?.match(/^Bearer\s+(\S+)$/i);
+  return match?.[1] ?? null;
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+export function authMiddleware(req: any, res: any, next: () => void): void {
+  const principal = getPrincipalFromRequest(req);
+  if (!principal) {
+    res.status(401).json({ error: "UNAUTHORIZED", message: "A valid bearer token is required" });
+    return;
+  }
+  req.auth = principal;
+  next();
 }
 
 // REAL authorization, not return true

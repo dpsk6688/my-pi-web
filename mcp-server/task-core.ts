@@ -47,6 +47,7 @@ export type Task = {
   sessionId: string;
   principalId?: string;
   title: string;
+  description?: string;
   type?: string;
   risk?: string;
   status: TaskStatus;
@@ -118,7 +119,7 @@ export class TaskManager {
     await fsp.rename(tmp, p);
   }
 
-  async createTask(input: { sessionId: string; title: string; type?: string; risk?: string; principalId?: string }): Promise<Task> {
+  async createTask(input: { sessionId: string; title: string; description?: string; type?: string; risk?: string; principalId?: string }): Promise<Task> {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const task: Task = {
@@ -126,6 +127,7 @@ export class TaskManager {
       sessionId: input.sessionId,
       principalId: input.principalId,
       title: input.title,
+      description: input.description,
       type: input.type,
       risk: input.risk,
       status: "pending",

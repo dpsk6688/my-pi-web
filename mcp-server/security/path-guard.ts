@@ -1,5 +1,6 @@
 import path from "path";
 import { realpathSync } from "fs";
+import fs from "fs/promises";
 
 export class PathGuardError extends Error {
   constructor(m: string){ super(m); this.name="PATH_TRAVERSAL"; }
@@ -66,9 +67,41 @@ export class PathGuard {
   }
 
   resolveAndValidate(unsafe: string): string {
-    if(unsafe.includes("\0")) throw new PathGuardError("Null byte");
+    if(unsafe.includes("\0")) throw new PathGuardError("NULL_BYTE");
     const resolved = path.resolve(this.realRoot, unsafe);
-    if(!this.isSameOrSubPath(resolved)) throw new PathGuardError("Traversal "+unsafe);
+    if(!this.isSameOrSubPath(resolved)) throw new PathGuardError("PATH_TRAVERSAL: "+unsafe);
     return resolved;
+  }
+}
+
+export function getAppRoot(): string {
+  return path.resolve(process.env.APP_ROOT || process.cwd());
+}
+
+export function resolveAndValidatePath(unsafe: string, root = getAppRoot()): string {
+  return new PathGuard(root).resolveAndValidate(unsafe);
+}
+
+export function isSameOrSubPath(root: string, target: string): boolean {
+  return new PathGuard(root).isSameOrSubPath(target);
+}
+
+export function isSubPath(root: string, target: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  if (resolvedRoot === resolvedTarget) return false;
+  return new PathGuard(root).isSameOrSubPath(target);
+}
+
+export async function atomicWriteFile(unsafe: string, content: string, root = getAppRoot()): Promise<void> {
+  const destination = resolveAndValidatePath(unsafe, root);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  const temporary = `${destination}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await fs.writeFile(temporary, content, { encoding: "utf8", flag: "wx" });
+    await fs.rename(temporary, destination);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
   }
 }

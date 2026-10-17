@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import fsp from "fs/promises";
 import { TaskManager } from "../../mcp-server/task-core.js";
+import { SSETransport } from "../../mcp-server/transport/sse-transport.js";
 
 describe("PR-2.6 E2E - Full SARA Chain", () => {
   let tmpRoot: string;
@@ -73,18 +74,16 @@ describe("PR-2.6 E2E - Full SARA Chain", () => {
   });
 
   it("E2E: SSE transport isolates", async () => {
-    try {
-      const mod = await import("../../mcp-server/transport/sse-transport.js");
-      const transport = mod.getSSETransport ? mod.getSSETransport() : new (mod as any).SSETransport();
-      const eventsA: any[] = [];
-      const eventsB: any[] = [];
-      const unsubA = transport.subscribe(SESS_A, (e: any) => eventsA.push(e));
-      const unsubB = transport.subscribe(SESS_B, (e: any) => eventsB.push(e));
-      transport.broadcast(SESS_A, "task_created", { id: "t1" });
-      transport.broadcast(SESS_B, "task_created", { id: "t2" });
-      expect(eventsA.length).toBe(1);
-      expect(eventsB.length).toBe(1);
-      unsubA(); unsubB();
-    } catch { expect(true).toBe(true); }
+    const transport = new SSETransport();
+    const eventsA: any[] = [];
+    const eventsB: any[] = [];
+    const unsubA = transport.subscribe(SESS_A, (event) => eventsA.push(event));
+    const unsubB = transport.subscribe(SESS_B, (event) => eventsB.push(event));
+    transport.taskCreated(SESS_A, { id: "t1" });
+    transport.taskCreated(SESS_B, { id: "t2" });
+    expect(eventsA.map((event) => event.taskId)).toEqual(["t1"]);
+    expect(eventsB.map((event) => event.taskId)).toEqual(["t2"]);
+    unsubA();
+    unsubB();
   });
 });

@@ -17,7 +17,7 @@ export interface Session {
 export class SessionManager {
   private sessions = new Map<string, Session>();
 
-  create(id: string, transport: any, server: any, auth?: any): Session {
+  create(id: string, transport: any = {}, server: any = {}, auth?: any): Session {
     const session: Session = {
       id,
       transport,

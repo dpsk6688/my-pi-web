@@ -3,7 +3,7 @@ import { TaskManager, Task } from "../task-core.js";
 
 export class SARAServer {
   private tm: TaskManager;
-  constructor(appRoot?: string) { this.tm = new TaskManager(appRoot); }
+  constructor(appRoot = process.cwd()) { this.tm = new TaskManager(appRoot); }
   async init(){ await this.tm.init(); }
   async createAndStart(req: any): Promise<Task> {
     const t = await this.tm.createTask({ sessionId: req.sessionId, title: req.title, type: req.type||'general', description: req.description, risk: req.risk||'low' });

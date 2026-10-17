@@ -23,7 +23,7 @@ import { promisify } from "util";
 import { TaskManager } from "./task-core.js";
 import { resolveAndValidatePath, atomicWriteFile, getAppRoot, isSameOrSubPath } from "./security/path-guard.js";
 import { evaluateCommand } from "./security/command-guard.js";
-import { authMiddleware, assertAuthConfig, extractToken } from "./security/auth.js";
+import { authMiddleware, assertAuthConfig } from "./security/auth.js";
 import { SessionManager } from "./transport/session-manager.js";
 import { SARAServer } from "./sara/server.js";
 
@@ -39,7 +39,7 @@ try {
   assertAuthConfig();
 } catch (e: any) {
   console.error(`[FATAL] ${e.message}`);
-  if (process.env.APP_ENV === "production") {
+  if (process.env.APP_ENV === "production" || process.env.NODE_ENV === "production") {
     process.exit(1);
   }
 }
@@ -66,7 +66,7 @@ async function safeExecFile(binary: string, args: string[]) {
       timeout: 10000, 
       maxBuffer: 1024 * 1024,
       cwd: APP_ROOT,
-      env: { PATH: process.env.PATH, HOME: process.env.HOME } // Minimal env
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NODE_ENV: process.env.NODE_ENV ?? "production" } // Minimal env
     });
     return { code: 0, decision, stdout: result.stdout, stderr: result.stderr };
   } catch (e: any) {

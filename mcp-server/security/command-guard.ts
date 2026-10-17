@@ -10,9 +10,8 @@ import path from "path";
 type GuardResult = { allowed: boolean; needsApproval?: boolean; reason?: string; absoluteBin?: string; };
 
 const ALLOWED_BINS: Record<string,string> = {
-  "git": "/usr/bin/git",
-  "ls": "/bin/ls",
-  "cat": "/bin/cat",
+  "git": process.platform === "win32" ? "git.exe" : "/usr/bin/git",
+  ...(process.platform === "win32" ? {} : { "ls": "/bin/ls", "cat": "/bin/cat" }),
 };
 
 const POLICY: Record<string,{ args: "no-traversal"|"git-only"|"any", risk: "low"|"medium"|"high" }> = {
@@ -45,6 +44,25 @@ export function checkCommand(binary: string, args: string[], workspaceRoot: stri
     return { allowed: true, needsApproval: true, reason: "High risk", absoluteBin: abs };
   }
   return { allowed: true, absoluteBin: abs };
+}
+
+export function evaluateCommand(binary: string, args: string[], workspaceRoot = process.env.APP_ROOT || process.cwd()): {
+  decision: "ALLOW" | "DENY" | "REVIEW";
+  reason?: string;
+  bypassable: false;
+  absoluteBin?: string;
+} {
+  if (process.env.MCP_ENABLE_RUN_COMMAND !== "true") {
+    return { decision: "DENY", reason: "Command execution is disabled", bypassable: false };
+  }
+  const result = checkCommand(binary, args, workspaceRoot);
+  if (!result.allowed) {
+    return { decision: "DENY", reason: result.reason, bypassable: false };
+  }
+  if (result.needsApproval) {
+    return { decision: "REVIEW", reason: result.reason, bypassable: false, absoluteBin: result.absoluteBin };
+  }
+  return { decision: "ALLOW", bypassable: false, absoluteBin: result.absoluteBin };
 }
 
 export function execWithLimits(bin: string, args: string[], opts: { timeoutMs?: number; cwd: string; env?: any }): Promise<{code:number; stdout:string; stderr:string}> {
