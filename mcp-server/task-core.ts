@@ -1,234 +1,307 @@
 
-/**
- * PR-2.1 Task Core - SARA Standard - v6 FINAL FIX
- * FIX: requestApproval direct write with verification, constructor injection
- */
-
-import fs from "fs";
-import fsp from "fs/promises";
+// MY-PI-WEB P0-4 Approval Binding - Task Core
+// SARA Standard + P0-4: approval bound to actionHash + inputHash + policyVersion + expiry + single-use
+import os from "os";
 import path from "path";
+import fsp from "fs/promises";
 import crypto from "crypto";
+import { PathGuard } from "./security/path-guard.js";
 
-export type TaskStatus = 'pending' | 'running' | 'needs_approval' | 'completed' | 'failed' | 'cancelled';
-export type TaskType = 'file' | 'command' | 'general' | 'approval';
-export type TaskRisk = 'low' | 'medium' | 'high';
+export const POLICY_VERSION = "1.0.0";
+export const APPROVAL_TTL_MS = 15 * 60 * 1000; // 15 min
 
-export interface TaskApproval {
+export type TaskStatus = "pending" | "running" | "needs_approval" | "completed" | "failed" | "cancelled";
+
+export type Approval = {
+  id: string; // single-use approval ID
   command: string;
   args: string[];
-  risk: TaskRisk;
-  reason: string;
   binary: string;
-}
-
-export interface Task {
-  id: string;
-  title: string;
-  type: TaskType;
-  status: TaskStatus;
-  sessionId: string;
+  risk: string;
+  reason: string;
+  // P0-4 binding
+  actionHash: string; // sha256(normalized command+args+binary+targetPath)
+  inputHash: string; // sha256(task title+type+session)
+  targetPath?: string;
+  targetVersion?: string;
+  policyVersion: string;
+  approverId?: string;
+  expiresAt: number;
+  used: boolean;
   createdAt: string;
-  updatedAt: string;
-  description?: string;
-  risk?: TaskRisk;
-  approval?: TaskApproval;
+};
+
+export type Attempt = {
+  id: string;
+  taskId: string;
+  startedAt: string;
+  env?: string;
+  pid?: number;
+  exitCode?: number;
+  outputHash?: string;
+  error?: string;
+};
+
+export type Task = {
+  id: string;
+  sessionId: string;
+  principalId?: string;
+  title: string;
+  type?: string;
+  risk?: string;
+  status: TaskStatus;
   result?: any;
   error?: string;
-  logs: { ts: string; status: TaskStatus; msg: string }[];
-}
+  approval?: Approval;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  attempts: Attempt[];
+};
 
-const TASK_DIR = ".data/tasks";
-
-export const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  pending: ['running', 'cancelled', 'failed'],
-  running: ['needs_approval', 'completed', 'failed', 'cancelled'],
-  needs_approval: ['running', 'completed', 'failed', 'cancelled'],
+const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  pending: ["running", "failed", "cancelled"],
+  running: ["needs_approval", "completed", "failed", "cancelled"],
+  needs_approval: ["running", "failed", "cancelled"],
   completed: [],
-  failed: ['pending'],
-  cancelled: ['pending'],
+  failed: ["pending"],
+  cancelled: ["pending"],
 };
 
 export function canTransition(from: TaskStatus, to: TaskStatus): boolean {
   return TRANSITIONS[from]?.includes(to) ?? false;
 }
 export function isTerminal(s: TaskStatus): boolean {
-  return s === 'completed' || s === 'failed' || s === 'cancelled';
+  return s === "completed" || s === "failed" || s === "cancelled";
 }
 
-function getAppRoot(override?: string): string {
-  return path.resolve(override || process.env.APP_ROOT || process.cwd());
+function sha256(s: string): string {
+  return crypto.createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
-
-function resolveAndValidatePath(userPath: string, appRootOverride?: string): string {
-  const APP_ROOT_DYNAMIC = getAppRoot(appRootOverride);
-  if (!userPath || typeof userPath !== "string") throw Object.assign(new Error("INVALID_PATH"), { code: "INVALID_PATH" });
-  if (userPath.includes("\0")) throw Object.assign(new Error("NULL_BYTE"), { code: "NULL_BYTE" });
-  const normalized = path.normalize(userPath);
-  const resolved = path.resolve(APP_ROOT_DYNAMIC, normalized);
-  const rel = path.relative(APP_ROOT_DYNAMIC, resolved);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw Object.assign(new Error(`PATH_TRAVERSAL: ${userPath}`), { code: "PATH_TRAVERSAL" });
-  }
-  try {
-    const realRoot = fs.realpathSync(APP_ROOT_DYNAMIC);
-    let realCheck: string;
-    if (fs.existsSync(resolved)) {
-      realCheck = fs.realpathSync(resolved);
-    } else {
-      let parent = path.dirname(resolved);
-      let depth = 0;
-      while (!fs.existsSync(parent) && parent !== APP_ROOT_DYNAMIC && depth < 20) {
-        parent = path.dirname(parent);
-        depth++;
-      }
-      if (!fs.existsSync(parent)) throw Object.assign(new Error(`PARENT_NOT_FOUND`), { code: "PARENT_NOT_FOUND" });
-      const realParent = fs.realpathSync(parent);
-      if (!realParent.startsWith(realRoot) && realParent !== realRoot) {
-        throw Object.assign(new Error(`PARENT_ESCAPE`), { code: "PARENT_ESCAPE" });
-      }
-      realCheck = path.join(realParent, path.relative(parent, resolved));
-      if (!realCheck.startsWith(realRoot)) throw Object.assign(new Error(`PATH_TRAVERSAL_AFTER_REALPATH`), { code: "PATH_TRAVERSAL" });
-      return resolved;
-    }
-    if (!realCheck.startsWith(realRoot) && realCheck !== realRoot) {
-      throw Object.assign(new Error(`SYMLINK_ESCAPE`), { code: "SYMLINK_ESCAPE" });
-    }
-  } catch (e: any) {
-    if (e.code && ["PATH_TRAVERSAL","SYMLINK_ESCAPE","PARENT_ESCAPE","NULL_BYTE","INVALID_PATH","PARENT_NOT_FOUND"].includes(e.code)) throw e;
-  }
-  return resolved;
+function normalizeAction(a: { command: string; args: string[]; binary: string; targetPath?: string }): string {
+  return JSON.stringify({
+    command: a.command.trim(),
+    args: a.args.map((x) => x.trim()),
+    binary: a.binary.trim(),
+    target: (a.targetPath || "").trim(),
+  });
+}
+function computeInputHash(t: { title: string; type?: string; sessionId: string }): string {
+  return sha256(JSON.stringify({ title: t.title, type: t.type || "", sessionId: t.sessionId }));
 }
 
 export class TaskManager {
-  private appRoot: string;
-  constructor(appRoot?: string) {
-    this.appRoot = getAppRoot(appRoot);
-  }
-  private getTaskDir(): string {
-    return resolveAndValidatePath(TASK_DIR, this.appRoot);
-  }
-  private getTaskPath(id: string): string {
-    if (!id || /[\\/]/.test(id) || id.includes("..")) throw Object.assign(new Error("INVALID_TASK_ID"), { code: "INVALID_TASK_ID" });
-    return resolveAndValidatePath(path.join(TASK_DIR, `${id}.json`), this.appRoot);
+  private pg: PathGuard;
+  private root: string;
+  constructor(root: string) {
+    this.pg = new PathGuard(root);
+    this.root = root;
   }
   async init() {
-    const dir = this.getTaskDir();
-    await fsp.mkdir(dir, { recursive: true });
+    await fsp.mkdir(this.root, { recursive: true });
   }
-  async createTask(params: { sessionId: string; title: string; type?: TaskType; description?: string; risk?: TaskRisk; approval?: TaskApproval }): Promise<Task> {
-    await this.init();
-    const id = `tsk_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+
+  private taskPath(id: string): string {
+    if (id.includes("/") || id.includes("\\") || id.includes("..")) throw new Error("INVALID_TASK_ID");
+    const p = path.join(this.root, id + ".json");
+    return this.pg.resolveAndValidate(p);
+  }
+  private async readTask(id: string): Promise<Task> {
+    const p = this.taskPath(id);
+    const raw = await fsp.readFile(p, "utf-8");
+    return JSON.parse(raw) as Task;
+  }
+  private async writeTask(t: Task): Promise<void> {
+    const p = this.taskPath(t.id);
+    const tmp = p + ".tmp-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    await fsp.writeFile(tmp, JSON.stringify(t, null, 2));
+    await fsp.rename(tmp, p);
+  }
+
+  async createTask(input: { sessionId: string; title: string; type?: string; risk?: string; principalId?: string }): Promise<Task> {
+    const id = crypto.randomUUID();
     const now = new Date().toISOString();
     const task: Task = {
       id,
-      title: params.title,
-      type: params.type || 'general',
-      status: 'pending',
-      sessionId: params.sessionId,
+      sessionId: input.sessionId,
+      principalId: input.principalId,
+      title: input.title,
+      type: input.type,
+      risk: input.risk,
+      status: "pending",
+      revision: 1,
       createdAt: now,
       updatedAt: now,
-      description: params.description,
-      risk: params.risk || 'low',
-      approval: params.approval,
-      logs: [{ ts: now, status: 'pending', msg: `Created by ${params.sessionId}` }],
+      attempts: [],
     };
-    const p = this.getTaskPath(id);
-    await fsp.writeFile(p, JSON.stringify(task, null, 2), "utf-8");
+    await this.writeTask(task);
     return task;
   }
   async getTask(id: string, sessionId: string): Promise<Task> {
-    const p = this.getTaskPath(id);
-    const raw = await fsp.readFile(p, "utf-8");
-    const task = JSON.parse(raw) as Task;
-    if (task.sessionId !== sessionId) throw Object.assign(new Error("SESSION_MISMATCH"), { code: "SESSION_MISMATCH" });
-    return task;
-  }
-  async updateStatus(id: string, sessionId: string, to: TaskStatus, extra?: { result?: any; error?: string; logMsg?: string; approval?: TaskApproval }): Promise<Task> {
-    const p = this.getTaskPath(id);
-    const raw = await fsp.readFile(p, "utf-8");
-    const task = JSON.parse(raw) as Task;
-    if (task.sessionId !== sessionId) throw Object.assign(new Error("SESSION_MISMATCH"), { code: "SESSION_MISMATCH" });
-    if (!canTransition(task.status, to)) {
-      throw Object.assign(new Error(`INVALID_TRANSITION: ${task.status} -> ${to}`), { code: "INVALID_TRANSITION" });
-    }
-    const now = new Date().toISOString();
-    task.status = to;
-    task.updatedAt = now;
-    if (extra?.result !== undefined) task.result = extra.result;
-    if (extra?.error !== undefined) task.error = extra.error;
-    if (extra?.approval !== undefined) task.approval = extra.approval;
-    task.logs.push({ ts: now, status: to, msg: extra?.logMsg || `Transition to ${to}` });
-    await fsp.writeFile(p, JSON.stringify(task, null, 2), "utf-8");
-    return task;
-  }
-  async start(id: string, sessionId: string): Promise<Task> {
-    return this.updateStatus(id, sessionId, 'running', { logMsg: 'Started' });
-  }
-  async requestApproval(id: string, sessionId: string, approval: TaskApproval): Promise<Task> {
-    // V6 FIX: Direct read-modify-write, no intermediate getTask that loses approval
-    const p = this.getTaskPath(id);
-    const raw = await fsp.readFile(p, "utf-8");
-    const task = JSON.parse(raw) as Task;
-    if (task.sessionId !== sessionId) throw Object.assign(new Error("SESSION_MISMATCH"), { code: "SESSION_MISMATCH" });
-    if (task.status !== 'running') throw Object.assign(new Error("MUST_BE_RUNNING"), { code: "MUST_BE_RUNNING" });
-    if (!canTransition(task.status, 'needs_approval')) throw Object.assign(new Error(`INVALID_TRANSITION`), { code: "INVALID_TRANSITION" });
-    const now = new Date().toISOString();
-    task.approval = approval; // PERSIST APPROVAL
-    task.risk = approval.risk;
-    task.status = 'needs_approval';
-    task.updatedAt = now;
-    task.logs.push({ ts: now, status: 'needs_approval', msg: `Needs approval: ${approval.command} ${approval.args.join(" ")} risk=${approval.risk}` });
-    await fsp.writeFile(p, JSON.stringify(task, null, 2), "utf-8");
-    // Verify persisted
-    const raw2 = await fsp.readFile(p, "utf-8");
-    const verified = JSON.parse(raw2) as Task;
-    if (!verified.approval) {
-      throw Object.assign(new Error("APPROVAL_NOT_PERSISTED"), { code: "APPROVAL_NOT_PERSISTED" });
-    }
-    return verified;
-  }
-  async approve(id: string, sessionId: string, approved: boolean): Promise<Task> {
-    const task = await this.getTask(id, sessionId);
-    if (task.status !== 'needs_approval') throw Object.assign(new Error("MUST_BE_NEEDS_APPROVAL"), { code: "MUST_BE_NEEDS_APPROVAL" });
-    if (!approved) {
-      return this.updateStatus(id, sessionId, 'failed', { error: 'Denied by user', logMsg: 'Denied by user' });
-    }
-    return this.updateStatus(id, sessionId, 'running', { logMsg: 'Approved, continuing' });
-  }
-  async complete(id: string, sessionId: string, result?: any): Promise<Task> {
-    return this.updateStatus(id, sessionId, 'completed', { result, logMsg: 'Completed' });
-  }
-  async fail(id: string, sessionId: string, error: string): Promise<Task> {
-    return this.updateStatus(id, sessionId, 'failed', { error, logMsg: `Failed: ${error}` });
-  }
-  async cancel(id: string, sessionId: string): Promise<Task> {
-    const task = await this.getTask(id, sessionId);
-    if (isTerminal(task.status)) throw Object.assign(new Error("ALREADY_TERMINAL"), { code: "ALREADY_TERMINAL" });
-    return this.updateStatus(id, sessionId, 'cancelled', { logMsg: 'Cancelled by user' });
-  }
-  async retry(id: string, sessionId: string): Promise<Task> {
-    return this.updateStatus(id, sessionId, 'pending', { logMsg: 'Retried to pending' });
+    const t = await this.readTask(id);
+    if (t.sessionId !== sessionId) throw new Error("SESSION_MISMATCH");
+    return t;
   }
   async listBySession(sessionId: string): Promise<Task[]> {
-    await this.init();
-    const dir = this.getTaskDir();
-    const files = await fsp.readdir(dir).catch(() => [] as string[]);
+    const files = await fsp.readdir(this.root);
     const tasks: Task[] = [];
     for (const f of files) {
-      if (!f.endsWith(".json") || !f.startsWith("tsk_")) continue;
+      if (!f.endsWith(".json")) continue;
       try {
-        const p = this.getTaskPath(f.replace(".json",""));
-        const raw = await fsp.readFile(p, "utf-8");
+        const raw = await fsp.readFile(path.join(this.root, f), "utf-8");
         const t = JSON.parse(raw) as Task;
         if (t.sessionId === sessionId) tasks.push(t);
       } catch {}
     }
-    return tasks.sort((a,b) => b.createdAt.localeCompare(a.createdAt));
+    return tasks;
   }
   async countBySession(sessionId: string): Promise<Record<TaskStatus, number>> {
-    const tasks = await this.listBySession(sessionId);
-    const counts: Record<TaskStatus, number> = { pending:0, running:0, needs_approval:0, completed:0, failed:0, cancelled:0 };
-    for (const t of tasks) counts[t.status]++;
-    return counts;
+    const list = await this.listBySession(sessionId);
+    const c: any = { pending: 0, running: 0, needs_approval: 0, completed: 0, failed: 0, cancelled: 0 };
+    for (const t of list) c[t.status] = (c[t.status] || 0) + 1;
+    return c;
+  }
+  async updateStatus(id: string, sessionId: string, status: TaskStatus): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (!canTransition(t.status, status)) throw new Error(`INVALID_TRANSITION ${t.status}->${status}`);
+    t.status = status;
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+  async start(id: string, sessionId: string): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (!canTransition(t.status, "running")) throw new Error(`INVALID_TRANSITION ${t.status}->running`);
+    const attempt: Attempt = { id: crypto.randomUUID(), taskId: id, startedAt: new Date().toISOString() };
+    t.attempts.push(attempt);
+    t.status = "running";
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+  async complete(id: string, sessionId: string, result?: any): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (!canTransition(t.status, "completed")) throw new Error(`INVALID_TRANSITION ${t.status}->completed`);
+    t.status = "completed";
+    t.result = result;
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+  async fail(id: string, sessionId: string, err: string): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    t.status = "failed";
+    t.error = err;
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+  async cancel(id: string, sessionId: string): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    // allow cancel from running or needs_approval
+    if (t.status !== "running" && t.status !== "needs_approval" && !canTransition(t.status, "cancelled")) {
+      throw new Error(`INVALID_TRANSITION ${t.status}->cancelled`);
+    }
+    t.status = "cancelled";
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+  async retry(id: string, sessionId: string): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (!canTransition(t.status, "pending")) throw new Error(`INVALID_TRANSITION ${t.status}->pending`);
+    t.status = "pending";
+    t.error = undefined;
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+
+  // P0-4: requestApproval with binding
+  async requestApproval(
+    id: string,
+    sessionId: string,
+    req: { command: string; args: string[]; binary: string; risk: string; reason: string; targetPath?: string }
+  ): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (!canTransition(t.status, "needs_approval")) throw new Error(`INVALID_TRANSITION ${t.status}->needs_approval`);
+    const actionHash = sha256(normalizeAction({ command: req.command, args: req.args, binary: req.binary, targetPath: req.targetPath }));
+    const inputHash = computeInputHash(t);
+    const now = Date.now();
+    const approval: Approval = {
+      id: crypto.randomUUID(),
+      command: req.command,
+      args: req.args,
+      binary: req.binary,
+      risk: req.risk,
+      reason: req.reason,
+      targetPath: req.targetPath,
+      actionHash,
+      inputHash,
+      policyVersion: POLICY_VERSION,
+      expiresAt: now + APPROVAL_TTL_MS,
+      used: false,
+      createdAt: new Date().toISOString(),
+    };
+    t.approval = approval;
+    t.status = "needs_approval";
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
+  }
+
+  // P0-4: approve with full binding checks
+  async approve(
+    id: string,
+    sessionId: string,
+    approved: boolean,
+    approverId?: string,
+    currentAction?: { command: string; args: string[]; binary: string; targetPath?: string }
+  ): Promise<Task> {
+    const t = await this.getTask(id, sessionId);
+    if (t.status !== "needs_approval") throw new Error("NOT_NEEDS_APPROVAL");
+    const a = t.approval;
+    if (!a) throw new Error("NO_APPROVAL");
+
+    // 1. single-use
+    if (a.used) throw new Error("APPROVAL_ALREADY_USED");
+    // 2. expiry
+    if (Date.now() > a.expiresAt) throw new Error("APPROVAL_EXPIRED");
+    // 3. policy version
+    if (a.policyVersion !== POLICY_VERSION) throw new Error("POLICY_VERSION_MISMATCH");
+    // 4. input hash (task changed after approval?)
+    const curInputHash = computeInputHash(t);
+    if (curInputHash !== a.inputHash) throw new Error("INPUT_HASH_MISMATCH - task input changed after approval");
+    // 5. action hash (args tampered?)
+    if (currentAction) {
+      const curHash = sha256(normalizeAction(currentAction));
+      if (curHash !== a.actionHash) throw new Error("ACTION_HASH_MISMATCH - approval bound to original action");
+    }
+
+    if (!approved) {
+      t.status = "failed";
+      t.error = "Denied by user";
+      a.used = true;
+      a.approverId = approverId;
+      t.updatedAt = new Date().toISOString();
+      t.revision++;
+      await this.writeTask(t);
+      return t;
+    }
+
+    a.used = true;
+    a.approverId = approverId;
+    t.status = "running";
+    t.updatedAt = new Date().toISOString();
+    t.revision++;
+    await this.writeTask(t);
+    return t;
   }
 }

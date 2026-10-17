@@ -2,28 +2,25 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import os from "os";
 import path from "path";
-import fs from "fs";
 import fsp from "fs/promises";
-import { TaskManager, canTransition, isTerminal, TRANSITIONS } from "../task-core.js";
+import { TaskManager, canTransition, isTerminal } from "../task-core.js";
 
 describe("PR-2.1 Task Core - SARA Standard", () => {
   let tmpRoot: string;
-  let origCwd: string;
   let tm: TaskManager;
-  const SESS_A = "sess_A_test";
-  const SESS_B = "sess_B_test";
+  let SESS_A: string;
+  let SESS_B: string;
 
   beforeEach(async () => {
     tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "task-core-"));
-    origCwd = process.cwd();
-    process.chdir(tmpRoot);
-    process.env.APP_ROOT = tmpRoot;
-    tm = new TaskManager();
+    const rand = Math.random().toString(36).slice(2,8) + "_" + Date.now().toString().slice(-4);
+    SESS_A = `sess_A_${rand}`;
+    SESS_B = `sess_B_${rand}`;
+    tm = new TaskManager(tmpRoot);
     await tm.init();
   });
 
   afterEach(async () => {
-    process.chdir(origCwd);
     await fsp.rm(tmpRoot, { recursive: true, force: true });
   });
 
@@ -80,7 +77,7 @@ describe("PR-2.1 Task Core - SARA Standard", () => {
       expect(loaded.status).toBe("pending");
     });
     it("REJECT path traversal in task id", async () => {
-      // @ts-ignore - testing invalid id
+      // @ts-ignore
       await expect(tm.getTask("../../etc/passwd", SESS_A)).rejects.toThrow();
       await expect(tm.getTask("a/b", SESS_A)).rejects.toThrow();
     });
@@ -101,7 +98,11 @@ describe("PR-2.1 Task Core - SARA Standard", () => {
       t = await tm.start(t.id, SESS_A);
       t = await tm.requestApproval(t.id, SESS_A, { command: "git", args: ["status"], binary: "git", risk: "medium", reason: "check status" });
       expect(t.status).toBe("needs_approval");
+      expect(t.approval).toBeDefined();
       expect(t.approval?.command).toBe("git");
+      expect(t.approval?.args).toEqual(["status"]);
+      const reloaded = await tm.getTask(t.id, SESS_A);
+      expect(reloaded.approval?.command).toBe("git");
       t = await tm.approve(t.id, SESS_A, true);
       expect(t.status).toBe("running");
       t = await tm.complete(t.id, SESS_A);
@@ -133,6 +134,8 @@ describe("PR-2.1 Task Core - SARA Standard", () => {
 
   describe("Counts", () => {
     it("count by status", async () => {
+      const before = await tm.listBySession(SESS_A);
+      expect(before.length).toBe(0);
       await tm.createTask({ sessionId: SESS_A, title: "1" });
       let t2 = await tm.createTask({ sessionId: SESS_A, title: "2" });
       t2 = await tm.start(t2.id, SESS_A);
@@ -143,6 +146,7 @@ describe("PR-2.1 Task Core - SARA Standard", () => {
       expect(counts.pending).toBe(1);
       expect(counts.running).toBe(1);
       expect(counts.completed).toBe(1);
+      expect(counts.failed).toBe(0);
     });
   });
 });
